@@ -617,12 +617,19 @@ cc_library_static {
         export_proto_headers: true,
     },
 
+    // Restore the legacy blocking FunctionFS path: kernel 3.10 has no AIO
+    // on f_fs, so adbd must fall back to blocking read/write for USB.
+    local_include_dirs: [
+        "daemon/include",
+    ],
+
     target: {
         android: {
             srcs: [
                 "daemon/property_monitor.cpp",
                 "daemon/usb.cpp",
                 "daemon/usb_ffs.cpp",
+                "daemon/usb_legacy.cpp",
                 "daemon/watchdog.cpp",
             ],
             shared_libs: [

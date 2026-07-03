@@ -58,6 +58,10 @@
 
 using android::base::StringPrintf;
 
+// AIO support on f_fs can't be known until the first io_submit. EINVAL on
+// the first read means the kernel lacks f_fs AIO; fall back to usb_legacy.cpp.
+static std::optional<bool> gFfsAioSupported;
+
 // Not all USB controllers support operations larger than 16k, so don't go above that.
 // Also, each submitted operation does an allocation in the kernel of that size, so we want to
 // minimize our queue depth while still maintaining a deep enough queue to keep the USB stack fed.
@@ -588,10 +592,19 @@ struct UsbFfsConnection : public Connection {
         block->pending = true;
         struct iocb* iocb = &block->control;
         if (io_submit(aio_context_.get(), 1, &iocb) != 1) {
+            if (errno == EINVAL && !gFfsAioSupported.has_value()) {
+                // First io_submit EINVAL = kernel has no f_fs AIO; flag it so the open
+                // thread re-dispatches to the legacy blocking path.
+                HandleError("failed to submit first read, AIO on FFS not supported");
+                gFfsAioSupported = false;
+                return false;
+            }
+
             HandleError(StringPrintf("failed to submit read: %s", strerror(errno)));
             return false;
         }
 
+        gFfsAioSupported = true;
         return true;
     }
 
@@ -722,6 +735,8 @@ struct UsbFfsConnection : public Connection {
     static constexpr int kInterruptionSignal = SIGUSR1;
 };
 
+void usb_init_legacy();
+
 static void usb_ffs_open_thread() {
     adb_thread_setname("usb ffs open");
 
@@ -740,6 +755,13 @@ static void usb_ffs_open_thread() {
     });
 
     while (true) {
+        // First AIO submission failed (no f_fs AIO): switch to the legacy
+        // blocking FFS path.
+        if (gFfsAioSupported.has_value() && !gFfsAioSupported.value()) {
+            LOG(INFO) << "failed to use nonblocking ffs, falling back to legacy";
+            return usb_init_legacy();
+        }
+
         unique_fd control;
         unique_fd bulk_out;
         unique_fd bulk_in;
@@ -767,5 +789,18 @@ static void usb_ffs_open_thread() {
 }
 
 void usb_init() {
+    // Skip nonblocking ffs up-front when init flags the kernel AIO-incompatible
+    // (props from init.qcom.usb.rc): the runtime EINVAL fallback can miss the
+    // adbd watchdog, so go straight to the legacy blocking path.
+    bool aio_compat = android::base::GetBoolProperty("sys.usb.ffs.aio_compat", false);
+    bool use_nonblocking = android::base::GetBoolProperty(
+            "persist.adb.nonblocking_ffs",
+            android::base::GetBoolProperty("ro.adb.nonblocking_ffs", true));
+    if (aio_compat || !use_nonblocking) {
+        LOG(INFO) << "adbd: skipping nonblocking ffs (aio_compat=" << aio_compat
+                  << ", use_nonblocking=" << use_nonblocking << ")";
+        usb_init_legacy();
+        return;
+    }
     std::thread(usb_ffs_open_thread).detach();
 }
