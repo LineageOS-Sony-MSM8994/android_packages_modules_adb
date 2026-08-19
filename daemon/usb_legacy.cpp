@@ -187,7 +187,7 @@ static void usb_legacy_ffs_open_thread(usb_handle* usb) {
         // Daemon-side atransport has no SetUsbHandle (#if ADB_HOST only);
         // BlockingConnectionAdapter wraps the usb_handle lifecycle instead.
         atransport* t = new atransport(kTransportUsb);
-        t->serial = "UsbFfs";
+        t->name = "UsbFfs";
         std::shared_ptr<Connection> connection =
                 std::make_shared<BlockingConnectionAdapter>(
                         std::make_unique<UsbBlockingConnection>(usb));
